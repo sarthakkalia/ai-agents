@@ -1,0 +1,33 @@
+{
+  "invoice_number": "INV-2024-001",
+  "source_file": "invoice_techcorp.pdf",
+  "vendor_name": "TechCorp Solutions Ltd.",
+  "vendor_email": "billing@techcorp.io",
+  "invoice_date": "2024-11-01",
+  "due_date": "2024-11-30",
+  "line_items": [
+    {
+      "description": "Software Development (Backend API)",
+      "quantity": 40.0,
+      "unit_price": 150.0,
+      "total": 6000.0
+    },
+    {
+      "description": "DevOps & Infrastructure Setup",
+      "quantity": 8.0,
+      "unit_price": 175.0,
+      "total": 1400.0
+    },
+    {
+      "description": "Code Review & Documentation",
+      "quantity": 4.0,
+      "unit_price": 100.0,
+      "total": 400.0
+    }
+  ],
+  "subtotal": 7800.0,
+  "tax_amount": 0.0,
+  "total_amount": 7800.0,
+  "currency": "USD",
+  "extraction_notes": null
+}

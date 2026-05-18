@@ -1,0 +1,7 @@
+mcp
+pdfplumber
+pydantic
+rich
+reportlab
+python-dotenv
+cerebras-cloud-sdk

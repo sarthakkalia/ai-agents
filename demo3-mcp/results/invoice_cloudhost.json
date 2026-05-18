@@ -1,0 +1,39 @@
+{
+  "invoice_number": "INV-CH-2024-Q4",
+  "source_file": "invoice_cloudhost.pdf",
+  "vendor_name": "CloudHost Pro",
+  "vendor_email": "accounts@cloudhost.pro",
+  "invoice_date": "2024-10-15",
+  "due_date": "2024-11-15",
+  "line_items": [
+    {
+      "description": "Cloud Server (4 vCPU, 16GB RAM) \u2014 Oct 1",
+      "quantity": 1.0,
+      "unit_price": 480.0,
+      "total": 480.0
+    },
+    {
+      "description": "Managed Database Service \u2014 Oct 1",
+      "quantity": 1.0,
+      "unit_price": 220.0,
+      "total": 220.0
+    },
+    {
+      "description": "CDN Bandwidth (500GB)",
+      "quantity": 1.0,
+      "unit_price": 45.0,
+      "total": 45.0
+    },
+    {
+      "description": "24/7 Support Plan \u2014 Oct 1",
+      "quantity": 1.0,
+      "unit_price": 99.0,
+      "total": 99.0
+    }
+  ],
+  "subtotal": 844.0,
+  "tax_amount": 67.52,
+  "total_amount": 911.52,
+  "currency": "USD",
+  "extraction_notes": "Auto-renewed monthly subscription. Cancel 30 days notice."
+}

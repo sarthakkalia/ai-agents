@@ -1,0 +1,39 @@
+{
+  "invoice_number": "PP-INV-0892",
+  "source_file": "invoice_designstudio.pdf",
+  "vendor_name": "Pixel Perfect Design Studio",
+  "vendor_email": "hello@pixelperfect.design",
+  "invoice_date": "2024-09-20",
+  "due_date": "2024-10-05",
+  "line_items": [
+    {
+      "description": "Brand Identity Redesign",
+      "quantity": 1.0,
+      "unit_price": 2500.0,
+      "total": 2500.0
+    },
+    {
+      "description": "UI/UX Design (Mobile App)",
+      "quantity": 1.0,
+      "unit_price": 3200.0,
+      "total": 3200.0
+    },
+    {
+      "description": "Icon Set (48 custom icons)",
+      "quantity": 48.0,
+      "unit_price": 25.0,
+      "total": 1200.0
+    },
+    {
+      "description": "Revision Rounds (3 included)",
+      "quantity": 3.0,
+      "unit_price": 0.0,
+      "total": 0.0
+    }
+  ],
+  "subtotal": 6900.0,
+  "tax_amount": 0.0,
+  "total_amount": 6900.0,
+  "currency": "USD",
+  "extraction_notes": "All design files delivered in Figma + exported assets"
+}
