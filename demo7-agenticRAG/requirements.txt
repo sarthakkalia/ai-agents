@@ -1,0 +1,14 @@
+langgraph==0.3.21
+langchain==0.3.25
+langchain-core==0.3.58
+langchain-groq==0.3.2
+langchain-community==0.3.24
+langchain-huggingface==0.1.2
+langchain-chroma==0.2.4
+langchain-tavily==0.1.6
+sentence-transformers==3.4.1
+chromadb==0.6.3
+pypdf==5.4.0
+tavily-python==0.5.1
+pydantic==2.11.3
+python-dotenv==1.1.0
