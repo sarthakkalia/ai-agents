@@ -213,4 +213,4 @@ aivenv/
 demo2/pdfs/
 demo7-agenticRAG/models/
 demo7-agenticRAG/docs/
-demo7-agenticRAG/chroma_db/
+demo7-agenticRAG/chroma_db

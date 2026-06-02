@@ -9,6 +9,7 @@ from nodes import (
     rewrite_query_node,
     web_search_for_context_node,
     check_answer_node,
+    rerank_node,
 )
 
 MAX_GENERATION_ATTEMPTS = 2
@@ -57,6 +58,7 @@ def build_graph() -> StateGraph[AgenticRAGState]:
     builder = StateGraph(AgenticRAGState)
 
     builder.add_node("retrieve",               retrieve_node)
+    builder.add_node("rerank",      rerank_node)
     builder.add_node("grade_docs",             grade_docs_node)
     builder.add_node("generate",               generate_node)
     builder.add_node("check_answer",           check_answer_node)
@@ -72,7 +74,8 @@ def build_graph() -> StateGraph[AgenticRAGState]:
 
     # fixed edges
     builder.add_edge(START, "retrieve")
-    builder.add_edge("retrieve", "grade_docs")
+    builder.add_edge("retrieve", "rerank") 
+    builder.add_edge("rerank", "grade_docs")
     builder.add_edge("generate", "check_answer")
     builder.add_edge("web_search_for_context", "rewrite_query")
     builder.add_edge("rewrite_query",          "retrieve")

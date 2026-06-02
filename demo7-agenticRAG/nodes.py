@@ -9,6 +9,11 @@ from langchain_chroma import Chroma
 from langchain_tavily import TavilySearch
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.documents import Document
+from sentence_transformers import CrossEncoder
+
+RERANK_MODEL  = "cross-encoder/ms-marco-MiniLM-L-6-v2"
+RERANK_TOP_K  = 4
+RETRIEVE_K    = 8
  
 from embeddings import get_embeddings
 from state import AgenticRAGState
@@ -24,6 +29,10 @@ llm = ChatGroq(
     temperature=0,
 )
 
+print("  [rerank] loading cross-encoder model...")
+cross_encoder = CrossEncoder(RERANK_MODEL)
+print("  [rerank] cross-encoder ready ✓")
+
 def _load_retriever():
     if not Path(CHROMA_DIR).exists():
         raise RuntimeError("Run python ingest.py first.")
@@ -33,7 +42,7 @@ def _load_retriever():
     return Chroma(
         persist_directory=CHROMA_DIR,
         embedding_function=embeddings,
-    ).as_retriever(search_kwargs={"k": 4})
+    ).as_retriever(search_kwargs={"k": RETRIEVE_K})
  
 retriever     = _load_retriever()
 tavily_search = TavilySearch(
@@ -41,6 +50,34 @@ tavily_search = TavilySearch(
     api_key=os.getenv("TAVILY_API_KEY"),
     content_chars_max=2000,
 )
+
+
+def rerank_node(state) -> dict:
+    docs     = state["documents"]
+    question = state["question"]
+
+    if not docs:
+        print("  [rerank] no docs to rerank")
+        return {"documents": []}
+    
+    print(f"\n  [rerank] scoring {len(docs)} docs with cross-encoder...")
+    pairs  = [(question, doc.page_content) for doc in docs]
+
+    scores = cross_encoder.predict(pairs)
+    scored = sorted(zip(scores, docs), key=lambda x: x[0], reverse=True)
+
+    top_docs = [doc for score, doc in scored[:RERANK_TOP_K]]
+
+    print(f"  [rerank] top {RERANK_TOP_K} scores after reranking:")
+    for i, (score, doc) in enumerate(scored[:RERANK_TOP_K]):
+        source = doc.metadata.get("file_name", "?")[:35]
+        print(f"    {i+1}. score={score:.3f}  ({source})")
+ 
+    discarded = len(docs) - RERANK_TOP_K
+    if discarded > 0:
+        print(f"  [rerank] discarded {discarded} low-scoring docs")
+
+    return {"documents": top_docs}
 
 # node-1 (retriever node)
 def retrieve_node(state: AgenticRAGState) -> dict:
@@ -101,12 +138,24 @@ def grade_docs_node(state: AgenticRAGState) -> dict:
 # node-3: (generate_node)
 generate_prompt = ChatPromptTemplate.from_messages([
     ("system",
-     "You are a helpful assistant. Answer the question using ONLY the provided context.\n"
-     "If the context doesn't contain enough information, say so honestly.\n"
-     "Do not make up information. Cite which source(s) you used.\n\n"
+     "You are a helpful research assistant. Synthesize a clear answer "
+     "from the provided context.\n\n"
+     
+     "IMPORTANT RULES:\n"
+     "1. Research papers rarely give textbook definitions — synthesize "
+     "   an explanation from what IS there. If multiple chunks describe "
+     "   how something works, piece them together into a clear answer.\n"
+     "2. Do NOT say 'the context does not contain a definition' — instead "
+     "   explain the concept using the information present.\n"
+     "3. If the topic clearly appears in the context (even without a formal "
+     "   definition), explain it using the surrounding information.\n"
+     "4. Only say you lack information if the topic is genuinely absent "
+     "   from all provided chunks.\n"
+     "5. Cite sources at the end.\n\n"
      "Context:\n{context}"),
     ("human", "{question}"),
 ])
+
 generate_chain = generate_prompt | llm
 
 def generate_node(state):
@@ -227,19 +276,22 @@ class AnswerCheck(BaseModel):
  
 answer_check_prompt = ChatPromptTemplate.from_messages([
     ("system",
-     "You are an answer quality checker.\n"
-     "Decide if the provided answer actually answers the question or not.\n\n"
-     "Answer 'no' (not useful) if the answer:\n"
-     "  - Says 'the context does not contain' or 'not enough information'\n"
-     "  - Gives a vague, indirect answer without real content\n"
-     "  - Answers a different question than what was asked\n\n"
+     "You are checking if an answer provides useful information about the topic.\n\n"
      "Answer 'yes' (useful) if the answer:\n"
-     "  - Directly addresses the question with real information\n"
-     "  - Provides a clear explanation even if partial"),
+     "  - Explains the concept even partially\n"
+     "  - Describes how something works, even without a formal definition\n"
+     "  - Synthesizes relevant information about the topic\n"
+     "  - References relevant sources and gives context\n\n"
+     "Answer 'no' (not useful) ONLY if the answer:\n"
+     "  - Provides zero information about the actual topic\n"
+     "  - Only says 'I cannot find this' with no explanation at all\n"
+     "  - Answers a completely different question\n\n"
+     "A partial or synthesized answer is USEFUL. "
+     "Only completely empty answers are NOT useful."),
     ("human",
      "Question: {question}\n\n"
-     "Answer to evaluate:\n{generation}\n\n"
-     "Is this a useful answer?"),
+     "Answer:\n{generation}\n\n"
+     "Does this answer provide useful information? (yes/no)"),
 ])
 
 def check_answer_node(state: AgenticRAGState) -> dict:
