@@ -1,15 +1,20 @@
 from typing import Annotated
 from typing_extensions import TypedDict
 from langchain_core.documents import Document
+from langchain_core.messages import BaseMessage
+from langgraph.graph.message import add_messages
 
 class AgenticRAGState(TypedDict):
-    question: str
-    original_question: str
-    documents: list[Document]
-    relevant_docs: list[Document]
-    web_search_context: list[Document]
-    generation: str
-    rewrite_count: int
+    qn: str
+    org_qn: str
+    docs: list[Document]
+    rel_docs: list[Document]
+    retrieval_confidence: str
+    web_search_cntx: list[Document]
+    gen: str
+    rewrite_query_cnt: int
     web_search_used: bool
-    answer_useful: bool
-    generation_attempts:  int
+    ans_useful: bool
+    gen_attempts:  int
+    msg: Annotated[list[BaseMessage], add_messages]
+    pipeline_log: list[str]

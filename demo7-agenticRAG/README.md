@@ -1,0 +1,19 @@
+retrieve<br>
+  ↓<br>
+rerank<br>
+  ↓<br>
+grade_docs<br>
+  ↓<br>
+generate<br>
+  ↓<br>
+check_answer<br>
+  ↓<br>
+web_search_for_context<br>
+  ↓<br>
+clear_for_web<br>
+  ↓<br>
+generate<br>
+  ↓<br>
+check_answer<br>
+  ↓<br>
+END<br>

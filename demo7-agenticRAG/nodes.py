@@ -1,22 +1,19 @@
 import os
 from pathlib import Path
+import re
 from typing import Literal
 from dotenv import load_dotenv
- 
 from pydantic import BaseModel, Field
 from langchain_groq import ChatGroq
 from langchain_chroma import Chroma
 from langchain_tavily import TavilySearch
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.documents import Document
-from sentence_transformers import CrossEncoder
-
-RERANK_MODEL  = "cross-encoder/ms-marco-MiniLM-L-6-v2"
-RERANK_TOP_K  = 4
-RETRIEVE_K    = 8
- 
+from langchain_core.messages import AIMessage, HumanMessage
+from sentence_transformers import CrossEncoder 
 from embeddings import get_embeddings
 from state import AgenticRAGState
+
 
 load_dotenv()
 
@@ -25,20 +22,23 @@ MODEL_DIR   = "./models"
 
 llm = ChatGroq(
     api_key=os.getenv("GROQ_API_KEY"),
-    model="llama-3.3-70b-versatile",
+    model="openai/gpt-oss-20b",
     temperature=0,
 )
 
-print("  [rerank] loading cross-encoder model...")
+
+RERANK_MODEL  = "cross-encoder/ms-marco-MiniLM-L-6-v2"
+RERANK_TOP_K  = 4
+RETRIEVE_K    = 8
+print("[rerank] loading cross-encoder model...")
 cross_encoder = CrossEncoder(RERANK_MODEL)
-print("  [rerank] cross-encoder ready ✓")
+print("[rerank] cross-encoder ready")
 
 def _load_retriever():
     if not Path(CHROMA_DIR).exists():
         raise RuntimeError("Run python ingest.py first.")
     
     embeddings = get_embeddings()
-
     return Chroma(
         persist_directory=CHROMA_DIR,
         embedding_function=embeddings,
@@ -51,14 +51,15 @@ tavily_search = TavilySearch(
     content_chars_max=2000,
 )
 
-
+# reranker node
+TOP_SCORE_THRESHOLD = -3.0
 def rerank_node(state) -> dict:
-    docs     = state["documents"]
-    question = state["question"]
+    docs     = state["docs"]
+    question = state["qn"]
 
     if not docs:
         print("  [rerank] no docs to rerank")
-        return {"documents": []}
+        return {"docs": []}
     
     print(f"\n  [rerank] scoring {len(docs)} docs with cross-encoder...")
     pairs  = [(question, doc.page_content) for doc in docs]
@@ -66,7 +67,17 @@ def rerank_node(state) -> dict:
     scores = cross_encoder.predict(pairs)
     scored = sorted(zip(scores, docs), key=lambda x: x[0], reverse=True)
 
-    top_docs = [doc for score, doc in scored[:RERANK_TOP_K]]
+    best_score = float(scored[0][0])
+    print(f"  [rerank] best score={best_score:.3f}")
+
+    if best_score < TOP_SCORE_THRESHOLD:
+        print("  [rerank] low confidence retrieval")
+        return {
+            "docs": [],
+            "retrieval_confidence": "low"
+        }
+
+    top_docs = [doc for _, doc in scored[:RERANK_TOP_K]]
 
     print(f"  [rerank] top {RERANK_TOP_K} scores after reranking:")
     for i, (score, doc) in enumerate(scored[:RERANK_TOP_K]):
@@ -77,118 +88,164 @@ def rerank_node(state) -> dict:
     if discarded > 0:
         print(f"  [rerank] discarded {discarded} low-scoring docs")
 
-    return {"documents": top_docs}
+    return {"docs": top_docs, "retrieval_confidence": "high"}
 
-# node-1 (retriever node)
+# retriever node
 def retrieve_node(state: AgenticRAGState) -> dict:
-    print(f"\n  [retrieve] searching for: '{state['question']}'")
+    print(f"\n  [retrieve] searching for: '{state['qn']}'")
 
-    docs = retriever.invoke(state["question"])
+    docs = retriever.invoke(state["qn"])
     print(f"  [retrieve] got {len(docs)} docs")
 
-    original = state.get("original_question") or state["question"]
+    original = state.get("org_qn") or state["qn"]
 
-    return {"documents": docs, "original_question": original}
+    return {"docs": docs, "org_qn": original}
 
-# node-2: (grade_docs_node) 
+# grade documents node
 class GradeDoc(BaseModel):
     """Grade whether a document is relevant to the question."""
     score: Literal["yes", "no"] = Field(
         description="'yes' if the document is relevant to the question, 'no' if not"
     )
 
-grader_llm = llm.with_structured_output(GradeDoc)
+grader_llm = llm.with_structured_output(GradeDoc,  method="json_mode")
  
 grader_prompt = ChatPromptTemplate.from_messages([
-    ("system",
-     "You are a strict relevance grader.\n"
-     "Your job is to check if a document would ACTUALLY HELP answer the question.\n\n"
-     "Grade 'yes' ONLY IF:\n"
-     "  - The document is genuinely about the same topic as the question\n"
-     "  - It contains information that directly addresses what is being asked\n\n"
-     "Grade 'no' IF:\n"
-     "  - The document only shares some keywords but is about a different subject\n"
-     "  - The document is tangentially related but would not help answer the question\n"
-     "  - The overlap is coincidental (e.g. 'generation' in animation ≠ 'generation' in RAG)\n\n"
-     "Be strict. A false positive (grading irrelevant doc as relevant) is worse than a false negative."),
-    ("human",
-     "Question: {question}\n\n"
-     "Document content:\n{document}\n\n"
-     "Would this document actually help answer the question? Answer yes or no only."),
+(
+    "system",
+    """
+    You are a relevance grader.
+    Return JSON only.
+    Valid responses:
+    {{"score":"yes"}}
+    or
+    {{"score":"no"}}
+    A document is relevant only if it helps answer the question.
+    """
+),
+(
+    "human",
+    """
+    Question:
+    {question}
+    Document:
+    {document}
+    """
+)
 ])
 
 grader_chain = grader_prompt | grader_llm
 
 def grade_docs_node(state: AgenticRAGState) -> dict:
-    print(f"\n  [grade_docs] grading {len(state['documents'])} documents...")
+    print(f"\n  [grade_docs] grading {len(state['docs'])} documents...")
     relevant = []
-    for i, doc in enumerate(state["documents"]):
+    for i, doc in enumerate(state["docs"]):
         result: GradeDoc = grader_chain.invoke({
             "document": doc.page_content,
-            "question": state["question"],
+            "question": state["qn"],
         })
         source = doc.metadata.get("file_name", "?")
         print(f"  [grade_docs] doc {i+1} ({source}): {result.score}")
         if result.score == "yes":
             relevant.append(doc)
  
-    print(f"  [grade_docs] {len(relevant)}/{len(state['documents'])} docs are relevant")
-    return {"relevant_docs": relevant}
+    print(f"  [grade_docs] {len(relevant)}/{len(state['docs'])} docs are relevant")
+    return {"rel_docs": relevant}
 
-# node-3: (generate_node)
+# generate node
 generate_prompt = ChatPromptTemplate.from_messages([
-    ("system",
-     "You are a helpful research assistant. Synthesize a clear answer "
-     "from the provided context.\n\n"
-     
-     "IMPORTANT RULES:\n"
-     "1. Research papers rarely give textbook definitions — synthesize "
-     "   an explanation from what IS there. If multiple chunks describe "
-     "   how something works, piece them together into a clear answer.\n"
-     "2. Do NOT say 'the context does not contain a definition' — instead "
-     "   explain the concept using the information present.\n"
-     "3. If the topic clearly appears in the context (even without a formal "
-     "   definition), explain it using the surrounding information.\n"
-     "4. Only say you lack information if the topic is genuinely absent "
-     "   from all provided chunks.\n"
-     "5. Cite sources at the end.\n\n"
-     "Context:\n{context}"),
-    ("human", "{question}"),
-])
+        (
+            "system",
+            """
+    You are a helpful research assistant.
+    Previous conversation:
+    {history}
+    IMPORTANT RULES:
+    1. Research papers rarely give textbook definitions.
+    2. Synthesize information from the provided context.
+    3. If multiple chunks describe a concept, combine them.
+    4. Do NOT say "the context doesn't define it" if you can infer it.
+    5. Only admit lack of information if the topic is genuinely absent.
+    6. Cite sources at the end.
+
+    Context:
+    {context}
+    """
+        ),
+        ("human", "{question}")
+    ])
 
 generate_chain = generate_prompt | llm
 
 def generate_node(state):
     docs_to_use = (
-        state.get("relevant_docs")
-        or state.get("web_search_context")
-        or state.get("documents", [])
+        state.get("rel_docs")
+        or state.get("web_search_cntx")
+        or state.get("docs", [])
     )
  
     source_label = (
-        "relevant ChromaDB docs" if state.get("relevant_docs")
-        else "web search results" if state.get("web_search_context")
+        "relevant ChromaDB docs"
+        if state.get("rel_docs")
+        else "web search results"
+        if state.get("web_search_cntx")
         else "raw ChromaDB docs"
     )
-    attempts = state.get("generation_attempts", 0) + 1
+
+    question = state.get("org_qn") or state["qn"]
+    attempts = state.get("gen_attempts", 0) + 1
     print(f"\n  [generate] attempt {attempts} — using {len(docs_to_use)} {source_label}")
  
+    print(
+        f"\n  [generate] attempt {attempts} "
+        f"— using {len(docs_to_use)} {source_label}"
+    )
+
     context = "\n\n---\n\n".join([
         f"[Source: {d.metadata.get('file_name', 'web')}]\n{d.page_content}"
         for d in docs_to_use
     ])
- 
+
+    prior_history = ""
+    prior_messages = state.get("msg", [])
+    if prior_messages:
+        pairs = []
+        for i in range(0, len(prior_messages) - 1, 2):
+            if i + 1 < len(prior_messages):
+                q = prior_messages[i].content
+                a = prior_messages[i + 1].content[:300]
+                pairs.append(f"Q: {q}\nA: {a}")
+        if pairs:
+            prior_history = "Previous conversation:\n" + "\n\n".join(pairs[-3:])
+
     response = generate_chain.invoke({
-        "context":  context,
-        "question": state.get("original_question") or state["question"],
+        "history": prior_history,
+        "context": context,
+        "question": question,
     })
+
+    content = re.sub(r"<tool_call>.*?<tool_call>", "", response.content, flags=re.DOTALL).strip()
  
+    new_messages = state.get("msg", []).copy()
+
+    new_messages.extend([
+        HumanMessage(content=question),
+        AIMessage(content=content),
+    ])
+
+    log = state.get("pipeline_log", [])
+    log.append(f"generate: attempt {attempts}, {len(docs_to_use)} docs used")
+
+
     return {
-        "generation":           response.content,
-        "generation_attempts":  attempts,
+        "gen": content,
+        "gen_attempts": attempts,
+        "msg": new_messages,
+        "pipeline_log": log,
+        "web_search_cntx": [],
     }
 
-# node-4: (rewrite_query_node)
+# rewrite query node
 rewrite_prompt = ChatPromptTemplate.from_messages([
     ("system",
      "You are a query rewriter improving retrieval from a vector database.\n\n"
@@ -196,55 +253,35 @@ rewrite_prompt = ChatPromptTemplate.from_messages([
      "1. NEVER change the subject or domain of the original question\n"
      "2. If the original question is about machine learning, keep it in ML\n"
      "3. If the original question is about biology, keep it in biology\n"
-     "4. Use web context ONLY for vocabulary — not to change the topic\n"
-     "5. If web results are about a completely different topic, ignore them\n"
-     "6. Keep the rewritten query under 12 words\n"
-     "7. Return ONLY the rewritten question — no explanation\n\n"
-     "EXAMPLE (what NOT to do):\n"
-     "  Original: 'what is transformer' (ML context)\n"
-     "  Web shows: electrical transformers\n"
-     "  WRONG rewrite: 'what is electrical transformer device'   ← changed domain!\n"
-     "  RIGHT rewrite: 'transformer neural network architecture attention mechanism'"),
+     "4. Keep the rewritten query under 12 words\n"
+     "5. Return ONLY the rewritten question — no explanation\n\n"),
     ("human",
-     "Original question (MUST stay in this domain): {original_question}\n\n"
-     "Web context (use for vocabulary only, do not change subject):\n"
-     "{web_context}\n\n"
-     "Rewrite the query with different words but SAME topic and domain:"),
+    "Original question (MUST stay in this domain): {original_question}\n\n"
+    "Rewrite the query SAME topic and domain:")
 ])
 rewrite_chain = rewrite_prompt | llm
 
 def rewrite_query_node(state: AgenticRAGState) -> dict:
-    print(f"\n  [rewrite_query] attempt {state.get('rewrite_count', 0) + 1}")
-    print(f"  [rewrite_query] original: '{state.get('original_question', state['question'])}'")
- 
-    # Summarise web context into a short excerpt for the prompt
-    web_docs = state.get("web_search_context", [])
-    if web_docs:
-        web_context = "\n\n".join([
-            f"[URL: {d.metadata.get('url', 'web')}]\n{d.page_content[:300]}"
-            for d in web_docs[:3]
-        ])
-    else:
-        web_context = "No web context available."
+    print(f"\n  [rewrite_query] attempt {state.get('rewrite_query_cnt', 0) + 1}")
+    print(f"  [rewrite_query] original: '{state.get('org_qn', state['qn'])}'")
  
     result = rewrite_chain.invoke({
-        "original_question": state.get("original_question", state["question"]),
-        "web_context":       web_context,
+        "original_question": state.get("org_qn", state["qn"]),
     })
     new_question = result.content.strip()
  
     print(f"  [rewrite_query] rewritten: '{new_question}'")
  
     return {
-        "question":      new_question,
-        "rewrite_count": state.get("rewrite_count", 0) + 1,
-        "documents":     [],
-        "relevant_docs": [],
+        "qn":      new_question,
+        "rewrite_query_cnt": state.get("rewrite_query_cnt", 0) + 1,
+        "docs":     [],
+        "rel_docs": [],
     }
 
-# node-5: (web_search_node)
+# web search node
 def web_search_for_context_node(state: AgenticRAGState) -> dict:
-    search_query = state.get("original_question") or state["question"]
+    search_query = state.get("org_qn") or state["qn"]
     print(f"\n  [web_search_for_context] fetching web context for: '{search_query}'")
  
     results = tavily_search.invoke({"query": search_query})
@@ -257,13 +294,12 @@ def web_search_for_context_node(state: AgenticRAGState) -> dict:
         )
         for r in raw
     ]
-    print(f"  [web_search_for_context] got {len(web_docs)} results → stored in web_search_context")
+    print(f"  [web_search_for_context] got {len(web_docs)} results → stored in web search context")
 
-    return {"web_search_context": web_docs}
+    return {"web_search_cntx": web_docs, "web_search_used": True,}
 
 
-# node-6: (answer_check_node)
-
+# answer checking node
 class AnswerCheck(BaseModel):
     """Check whether the generated answer actually answers the question."""
     useful: Literal["yes", "no"] = Field(
@@ -289,21 +325,28 @@ answer_check_prompt = ChatPromptTemplate.from_messages([
      "A partial or synthesized answer is USEFUL. "
      "Only completely empty answers are NOT useful."),
     ("human",
-     "Question: {question}\n\n"
-     "Answer:\n{generation}\n\n"
-     "Does this answer provide useful information? (yes/no)"),
+        """
+        Question: {question}
+        Answer:
+        {generation}
+        Return JSON only.
+        Example:
+        {{"useful":"yes"}}
+        or
+        {{"useful":"no"}}
+        """
+        ),
 ])
 
 def check_answer_node(state: AgenticRAGState) -> dict:
     print(f"\n  [check_answer] evaluating answer quality...")
-    generation = state.get("generation", "")
+    generation = state.get("gen", "")
     failure_phrases = [
-        "does not contain enough information",
-        "not enough information to answer",
-        "cannot provide an answer",
-        "no information available",
-        "context is insufficient",
-        "unable to answer this question",
+        "don't contain any information",
+        "does not contain any information",
+        "cannot determine",
+        "cannot find information",
+        "topic is not present",
     ]
 
     first_part    = generation[:200].lower()
@@ -315,15 +358,15 @@ def check_answer_node(state: AgenticRAGState) -> dict:
  
     if obvious_fail:
         print(f"  [check_answer] obvious failure → needs better source")
-        return {"answer_useful": False}
+        return {"ans_useful": False}
  
-    answer_check_llm   = llm.with_structured_output(AnswerCheck)
+    answer_check_llm   = llm.with_structured_output(AnswerCheck, method="json_mode")
     answer_check_chain = answer_check_prompt | answer_check_llm
  
     result = answer_check_chain.invoke({
-        "question":   state.get("original_question") or state["question"],
+        "question":   state.get("org_qn") or state["qn"],
         "generation": generation,
     })
     useful = result.useful == "yes"
     print(f"  [check_answer] answer useful: {result.useful}")
-    return {"answer_useful": useful}
+    return {"ans_useful": useful}
