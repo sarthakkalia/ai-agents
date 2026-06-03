@@ -65,7 +65,10 @@ def build_graph() -> StateGraph[AgenticRAGState]:
     builder.add_node("rewrite_query",          rewrite_query_node)
  
     def clear_relevant_and_generate(state):
-        return {"rel_docs": []}
+        return {
+            "rel_docs": [],
+            "docs": [],
+        }
 
     builder.add_node("clear_for_web", clear_relevant_and_generate)
 

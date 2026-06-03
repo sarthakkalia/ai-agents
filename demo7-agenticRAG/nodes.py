@@ -195,11 +195,6 @@ def generate_node(state):
     question = state.get("org_qn") or state["qn"]
     attempts = state.get("gen_attempts", 0) + 1
     print(f"\n  [generate] attempt {attempts} — using {len(docs_to_use)} {source_label}")
- 
-    print(
-        f"\n  [generate] attempt {attempts} "
-        f"— using {len(docs_to_use)} {source_label}"
-    )
 
     context = "\n\n---\n\n".join([
         f"[Source: {d.metadata.get('file_name', 'web')}]\n{d.page_content}"
@@ -224,25 +219,24 @@ def generate_node(state):
         "question": question,
     })
 
-    content = re.sub(r"<tool_call>.*?<tool_call>", "", response.content, flags=re.DOTALL).strip()
- 
-    new_messages = state.get("msg", []).copy()
-
-    new_messages.extend([
-        HumanMessage(content=question),
-        AIMessage(content=content),
-    ])
+    content = re.sub(r"<tool_call>.*?</tool_call>", "", response.content, flags=re.DOTALL).strip()
 
     log = state.get("pipeline_log", [])
     log.append(f"generate: attempt {attempts}, {len(docs_to_use)} docs used")
 
+    messages = state.get("msg", [])
+
+    updated_msgs = messages + [
+        HumanMessage(content=question),
+        AIMessage(content=content),
+        ]
+    updated_msgs = updated_msgs[-6:]
 
     return {
         "gen": content,
         "gen_attempts": attempts,
-        "msg": new_messages,
+        "msg": updated_msgs,
         "pipeline_log": log,
-        "web_search_cntx": [],
     }
 
 # rewrite query node
@@ -256,8 +250,13 @@ rewrite_prompt = ChatPromptTemplate.from_messages([
      "4. Keep the rewritten query under 12 words\n"
      "5. Return ONLY the rewritten question — no explanation\n\n"),
     ("human",
-    "Original question (MUST stay in this domain): {original_question}\n\n"
-    "Rewrite the query SAME topic and domain:")
+    """
+    Original question: {original_question}
+    Current query: {current_query}
+
+    Improve the current query for retrieval.
+    Return only the rewritten query.
+    """)
 ])
 rewrite_chain = rewrite_prompt | llm
 
@@ -267,6 +266,7 @@ def rewrite_query_node(state: AgenticRAGState) -> dict:
  
     result = rewrite_chain.invoke({
         "original_question": state.get("org_qn", state["qn"]),
+        "current_query": state["qn"],
     })
     new_question = result.content.strip()
  
